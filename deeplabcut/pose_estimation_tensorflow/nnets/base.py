@@ -29,6 +29,7 @@ class BasePoseNet(metaclass=abc.ABCMeta):
         ...
 
     def train(self, batch):
+        print("train batch input:", batch[Batch.inputs])
         heads = self.get_net(batch[Batch.inputs])
         if self.cfg["weigh_part_predictions"]:
             part_score_weights = batch[Batch.part_score_weights]
@@ -36,6 +37,8 @@ class BasePoseNet(metaclass=abc.ABCMeta):
             part_score_weights = 1.0
 
         def add_part_loss(pred_layer):
+            print(batch[Batch.part_score_targets], batch[Batch.part_score_targets].shape)
+            print(heads[pred_layer], heads[pred_layer].shape)
             return tf.compat.v1.losses.sigmoid_cross_entropy(
                 batch[Batch.part_score_targets], heads[pred_layer], part_score_weights
             )
