@@ -17,6 +17,8 @@ https://imgaug.readthedocs.io/en/latest/
 import logging
 import os
 import pickle
+import time
+from tqdm import tqdm
 
 import imgaug.augmenters as iaa
 import numpy as np
@@ -293,8 +295,58 @@ class ImgaugPoseDataset(BasePoseDataset):
             pipeline.add(iaa.Resize({"height": height, "width": width}))
         return pipeline
 
-    def get_batch(self):
-        img_idx = np.random.choice(self.num_images, size=self.batch_size, replace=True)
+    def create_train_batches(self, shuffle=True):
+        t1 = time.time()
+        rest = self.num_images % self.batch_size
+        indices = np.arange(self.num_images - rest)
+        np.random.shuffle(indices)
+        batched_indices = np.array_split(indices, (self.num_images-rest)/self.batch_size)
+
+        batches = []
+        for batch_idx in tqdm(batched_indices, desc="Generating batches"):
+            (batch_images, joint_ids, batch_joints, data_items, sm_size, target_size) = self.get_batch(batched_indices=batch_idx)
+            batches.append(self.next_batch((batch_images, joint_ids, batch_joints, data_items, sm_size, target_size)))
+        
+        print("Batch generation took: ", time.time()-t1)
+        return batches
+
+    def mp_batcher(self, idx):
+        (batch_images, joint_ids, batch_joints, data_items, sm_size, target_size) = self.get_batch(batched_indices=idx)
+        return self.next_batch((batch_images, joint_ids, batch_joints, data_items, sm_size, target_size))
+
+    def create_train_batches_mp(self):
+        import concurrent.futures
+        t1 = time.time()
+        rest = self.num_images % self.batch_size
+        indices = np.arange(self.num_images - rest)
+        np.random.shuffle(indices)
+        batched_indices = np.array_split(indices, (self.num_images-rest)/self.batch_size)
+        
+        batches = []
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = {}
+            for batch_idx in batched_indices:
+                futures[executor.submit(self.mp_batcher, batch_idx)] = batch_idx
+            
+            for future in tqdm(concurrent.futures.as_completed(futures), desc="Generating batches"):
+                try:
+                    result = future.result()
+                    batches.append(result)
+                except Exception as exc:
+                    print('%r generated an exception: %s' % (futures[future], exc))
+                else:
+                    #print('%r returned result: %s' % (futures[future], result))
+                    pass
+                    
+        print("MP Batch generation took: ", time.time()-t1)
+        return batches
+
+    def get_batch(self, batched_indices=None):
+        if batched_indices is not None:
+            img_idx = batched_indices
+        else:
+            img_idx = np.random.choice(self.num_images, size=self.batch_size, replace=True)
         batch_images = []
         batch_joints = []
         joint_ids = []
@@ -394,17 +446,13 @@ class ImgaugPoseDataset(BasePoseDataset):
             Batch.locref_mask: locref_masks,
         }
 
-    def next_batch(self):
+    def next_batch(self, precomputed=None):
         while True:
-            (
-                batch_images,
-                joint_ids,
-                batch_joints,
-                data_items,
-                sm_size,
-                target_size,
-            ) = self.get_batch()
-
+            if precomputed is None:
+                (batch_images, joint_ids, batch_joints, data_items, sm_size, target_size,) = self.get_batch()
+            else:
+                (batch_images, joint_ids, batch_joints, data_items, sm_size, target_size) = precomputed
+            
             pipeline = self.build_augmentation_pipeline(
                 height=target_size[0], width=target_size[1], apply_prob=0.5
             )
